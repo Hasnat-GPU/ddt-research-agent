@@ -43,8 +43,11 @@ def extract(url: str) -> str:
 
 PLAN_SYSTEM = """TASK: PLAN. You plan web research for a research agent.
 You get a question, the claims the agent already knows (each with an id) and the evidence bar.
-Return only JSON: {"topic": "2 to 4 lowercase words", "covered": [ids of known claims that answer part of the question], "queries": [web search queries for what is still missing]}.
+You may also get open gaps (parts of earlier questions that no checked claim answered yet) and past queries (earlier web searches that found checked claims for similar questions).
+Return only JSON: {"topic": "2 to 4 lowercase words", "parts": [2 to 4 sub-questions that together answer the question], "covered": [ids of known claims that answer part of the question], "queries": [web search queries for what is still missing]}.
 Rules:
+- Every part is one short sub-question of the given question.
+- Reuse or adapt a past query when it fits a missing part; an open gap that matches a missing part is worth a query.
 - Prefer the known claims. Add a query only for a part of the question that no known claim answers.
 - If the known claims fully answer the question, "queries" is [].
 - If no claims are known, return exactly 3 queries.
@@ -52,12 +55,15 @@ Rules:
 - The evidence bar is how many claims from different sources each part of the question needs."""
 
 
-def plan(question: str, known_claims: list[dict], evidence_bar: int) -> dict:
+def plan(question: str, known_claims: list[dict], evidence_bar: int,
+         open_gaps: list[str] | None = None, past_queries: list[str] | None = None) -> dict:
     user = json.dumps({"question": question, "evidence_bar": evidence_bar,
-                       "known_claims": [{"id": c["id"], "text": c["text"]} for c in known_claims]})
+                       "known_claims": [{"id": c["id"], "text": c["text"]} for c in known_claims],
+                       "open_gaps": open_gaps or [], "past_queries": past_queries or []})
     out = llm.chat_json(PLAN_SYSTEM, user)
     known_ids = {c["id"] for c in known_claims}
-    return {"topic": str(out.get("topic") or "").strip().lower(),
+    parts = [str(x) for x in (out.get("parts") or []) if str(x).strip()][:4] or [question]
+    return {"topic": str(out.get("topic") or "").strip().lower(), "parts": parts,
             "covered": [i for i in out.get("covered") or [] if i in known_ids],
             "queries": [str(q) for q in (out.get("queries") or [])][:3]}
 

@@ -2,6 +2,8 @@
 
 A question containing the word "unreliable" makes the stand-in model draft 2 made-up quotes out of 3,
 so the self-model's evidence bar must rise (the stand-in version of check S5).
+LATE pages are offline until LATE_ONLINE is set to True: the stand-in web gains a page between two runs
+(the stand-in version of check S10). Words are compared by their first 5 letters ("stems").
 """
 import json
 import re
@@ -27,7 +29,21 @@ PAGES = {
         "European AI startups raised record venture funding in 2026 according to several industry trackers.\n"
         "Several large rounds in 2026 went to companies building foundation models in France and Germany."),
 }
-TOPICS = {"nemotron": 0, "act": 1, "funding": 2, "startup": 2, "unreliable": 3}
+LATE = {
+    "https://example.org/nemotron-benchmark": (
+        "Nemotron 3 Super reached the top score on the agentic benchmark results table published in 2026."),
+}
+LATE_ONLINE = False
+TOPICS = {"nemotron": 0, "act": 1, "funding": 2, "startup": 2, "unreliable": 3, "benchmark": 4}
+STOP = {"what", "does", "which", "when", "where", "with", "under", "from", "nvidia", "nemotron"}
+
+
+def _pages() -> dict:
+    return {**PAGES, **LATE} if LATE_ONLINE else PAGES
+
+
+def _stems(text: str) -> set:
+    return {w[:5] for w in re.findall(r"\w+", text.lower()) if len(w) > 3 and w not in STOP}
 
 
 def _topic_of(text: str) -> str:
@@ -43,28 +59,29 @@ def _topic_of(text: str) -> str:
 
 def search(query: str) -> list[dict]:
     words = set(re.findall(r"\w+", query.lower()))
-    urls = sorted(PAGES, key=lambda u: -len(words & set(re.findall(r"\w+", u))))  # best match first
-    return [{"url": u, "title": u.rsplit("/", 1)[-1], "content": PAGES[u][:200], "raw_content": PAGES[u]}
+    pages = _pages()
+    urls = sorted(pages, key=lambda u: -len(words & set(re.findall(r"\w+", u))))  # best match first
+    return [{"url": u, "title": u.rsplit("/", 1)[-1], "content": pages[u][:200], "raw_content": pages[u]}
             for u in urls]
 
 
 def extract(url: str) -> str:
-    return PAGES.get(url, "")
+    return _pages().get(url, "")
 
 
 def chat_json(system: str, user: str) -> dict:
     data = json.loads(user)
     q = data["question"]
     if system.startswith("TASK: PLAN"):
-        stop = {"what", "does", "which", "when", "where", "with", "under", "from", "nvidia", "nemotron"}
-        words = {w for w in re.findall(r"\w+", q.lower()) if len(w) > 3} - stop
-        known = [c["id"] for c in data["known_claims"] if words & set(re.findall(r"\w+", c["text"].lower()))]
+        parts = [x.strip() for x in q.rstrip("?").split(" and ")]
+        known = [c["id"] for c in data["known_claims"] if len(_stems(q) & _stems(c["text"])) >= 2]
         if known:
-            return {"topic": _topic_of(q), "covered": known, "queries": []}
-        return {"topic": _topic_of(q), "covered": [], "queries": [q, f"{q} overview", f"{q} details"]}
+            return {"topic": _topic_of(q), "parts": parts, "covered": known, "queries": []}
+        return {"topic": _topic_of(q), "parts": parts, "covered": [], "queries": [q, f"{q} overview", f"{q} details"]}
     claims = []
     for s in data["sources"][:3]:
-        line = s["excerpt"].split("\n")[0]
+        lines = s["excerpt"].split("\n")
+        line = max(lines, key=lambda l: len(_stems(q) & _stems(l)))  # the first line on a tie
         quote = " ".join(line.split()[:12])
         if "unreliable" in q.lower() and len(claims) >= 1:
             quote = "this sentence was invented by the stand-in model and appears on no page at all"

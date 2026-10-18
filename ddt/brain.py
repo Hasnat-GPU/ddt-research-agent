@@ -1,8 +1,8 @@
 """The DDT brain outside the model: checked claims, runs and the self-model, versioned.
 
 Files in the brain directory (brain/ unless DDT_BRAIN_DIR is set):
-brain.jsonl (readable entries), brain.npy (row i = the i-th claim), selfmodel.json,
-meta.json ({"version": N}) and versions/v<N>/ (the files as they were at version N).
+brain.jsonl (readable entries), brain.npy (row i = the i-th claim), selfmodel.json, metacog.json,
+the harness stores episodes, gaps and tools (.jsonl + .npy each), meta.json ({"version": N}) and versions/v<N>/ (the files as they were at version N).
 """
 import json
 import os
@@ -16,7 +16,8 @@ import numpy as np
 
 from . import llm
 
-FILES = ["brain.jsonl", "brain.npy", "selfmodel.json"]
+FILES = ["brain.jsonl", "brain.npy", "selfmodel.json", "metacog.json", "episodes.jsonl", "episodes.npy",
+         "gaps.jsonl", "gaps.npy", "tools.jsonl", "tools.npy"]
 MERGE_SIM = 0.95
 _batch = {"open": False}
 
@@ -129,13 +130,14 @@ def add_run(record: dict) -> None:
     _save(items, None)
 
 
-def retrieve(question: str, k: int = 5, min_sim: float = 0.75) -> list[dict]:
-    """The k most similar non-stale claims at or above min_sim, each with its similarity."""
+def retrieve(question: str, k: int = 5, min_sim: float = 0.75, vec=None) -> list[dict]:
+    """The k most similar non-stale claims at or above min_sim, each with its similarity.
+    vec: the question's vector, if the caller already has it."""
     vecs = vectors()
     if vecs is None or not len(vecs):
         return []
     claims = [e for e in entries() if e["kind"] == "claim"]
-    q = llm.embed([question])[0]
+    q = llm.embed([question])[0] if vec is None else vec
     if q.shape[0] != vecs.shape[1]:
         print("[WARN] embedding size differs from the stored vectors; nothing retrieved", flush=True)
         return []

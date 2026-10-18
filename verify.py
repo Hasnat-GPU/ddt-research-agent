@@ -1,14 +1,16 @@
 """Runs checks S2 to S7 and both controls, prints PASS, FAIL or NOT TRIGGERED with the measured numbers,
 and appends a dated section to the results file.
 
-python verify.py           live: Nebius Token Factory and Tavily, at most 40 Tavily searches
+python verify.py           live: Nebius Token Factory and Tavily, at most 60 Tavily searches
 python verify.py --fake    the same checks with the offline stand-ins (no network)
 
 Brains used (all created fresh): brain_verify (S3, S4, S5), brain_control (failure control),
-brain_s6 (a copy of brain_verify for S6), brain_s5fake (S5 stand-in), brain_s7 (S7).
+brain_s6 (a copy of brain_verify for S6), brain_s5fake (S5 stand-in), brain_s10fake (S10 stand-in),
+brain_s7 (S7).
 """
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -21,7 +23,9 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent
-SEARCH_CAP = 40
+SEARCH_CAP = 60
+S10_Q1 = "What sizes does the Nemotron family come in and what are the Nemotron benchmark results?"
+S10_Q2 = "What are the Nemotron benchmark results?"
 MADE_UP_QUOTE = "the purple elephant negotiated quarterly tariffs with seventeen lunar bakeries on tuesday morning"
 RESULTS_FILE = ROOT.parent / "Testing" / "results.md" if (ROOT.parent / "Testing").is_dir() else ROOT / "results.md"
 
@@ -66,6 +70,21 @@ def s5_check(agent, question: str, topic: str) -> tuple[str, str]:
     return ("PASS" if shown else "FAIL"), numbers
 
 
+def mean(xs: list[float]) -> float:
+    return sum(xs) / len(xs)
+
+
+def replay(log: list[dict], lr: float) -> tuple[list[float], list[float]]:
+    """Replay the logged claims in order through a fresh online model; return the log losses and the final w."""
+    from ddt import metacog
+    w, losses = [0.0] * 6, []
+    for e in log:
+        p = min(max(metacog.p_pass(e["x"], w), 1e-6), 1 - 1e-6)
+        losses.append(-math.log(p) if e["y"] else -math.log(1 - p))
+        w = [wi + lr * (e["y"] - p) * xi for wi, xi in zip(w, e["x"])]
+    return losses, w
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fake", action="store_true", help="use the offline stand-ins")
@@ -88,6 +107,22 @@ def main() -> None:
     status, numbers = s5_check(agent, "What happened in the unreliable topic?", "unreliable topic")
     results["S5 stand-in"] = status
     say(f"S5 stand-in {status} | {numbers}")
+    from tests import fakes
+    fresh_brain("brain_s10fake")
+    fakes.LATE_ONLINE = False
+    r1 = agent.research(S10_Q1, topic=A["topic"])
+    fakes.LATE_ONLINE = True  # the stand-in web gains the page that answers the open gap
+    r2 = agent.research(S10_Q2, topic=A["topic"])
+    off = agent.research(S10_Q2, topic=A["topic"], use_brain=False)
+    fakes.LATE_ONLINE = False
+    from ddt.stores import gaps
+    opened = [g["id"] for g in gaps.all() if g["question"] == S10_Q1]
+    ok = bool(opened) and set(opened) & set(r2["open_from_before"]) and r2["closed"] >= 1
+    results["S10 stand-in"] = "PASS" if ok else "FAIL"
+    results["S10 control"] = "PASS" if not off["open_from_before"] else "CONTROL BROKEN"
+    say(f"S10 stand-in {results['S10 stand-in']} | run 1 opened {r1['opened']} gap(s) {opened}; run 2 retrieved "
+        f"{r2['open_from_before']} and closed {r2['closed']}")
+    say(f"S10 control {results['S10 control']} | brain off: gaps retrieved {off['open_from_before']} (must be none)")
     if not a.fake:
         os.environ.pop("DDT_FAKE")
     research.SEARCHES["total"] = 0
@@ -133,6 +168,16 @@ def main() -> None:
         say(f"S4 {results['S4']} | after set B ({len(B['questions'])} questions), set A again:")
         for q in A["questions"]:
             say(describe(q, first[q], third[q]))
+
+        # S8: the twin's search predictions improve from round 1 to round 2 of S3; the brain-off control must not
+        e1 = [first[q]["error"]["searches"] for q in A["questions"]]
+        e2 = [second[q]["error"]["searches"] for q in A["questions"]]
+        improved = mean(e2) < mean(e1)
+        control_improved = c2["error"]["searches"] < c1["error"]["searches"]
+        results["S8"] = "VOID" if control_improved else ("PASS" if improved else "FAIL")
+        say(f"S8 {results['S8']} | mean absolute error of predicted vs actual searches: round 1 {mean(e1):.3f} "
+            f"({e1}), round 2 {mean(e2):.3f} ({e2}); control (brain off): {c1['error']['searches']} -> "
+            f"{c2['error']['searches']}, lower in round 2: {'yes (S8 void)' if control_improved else 'no, as it must'}")
     except RuntimeError as e:
         say(f"STOPPED: {e}")
 
@@ -190,6 +235,31 @@ def main() -> None:
         status, numbers = "NOT RUN", str(e)
     results["S5"] = status
     say(f"S5 {status} | topic \"{qs['S5']['topic']}\": {numbers}")
+
+    # S9: replay the logged claims with lr 0.5 and with lr 0 (the control)
+    from ddt import metacog
+    log = metacog.load()["log"]
+    if len(log) >= 10:
+        l5, _ = replay(log, 0.5)
+        l0, w0 = replay(log, 0.0)
+        h = len(log) // 2
+        if any(w0):
+            results["S9"] = "CONTROL BROKEN"
+        else:
+            results["S9"] = "PASS" if mean(l5[h:]) < mean(l0[h:]) else "FAIL"
+        say(f"S9 {results['S9']} | {len(log)} logged claims; mean log loss on the second half ({len(log) - h} claims): "
+            f"lr 0.5 {mean(l5[h:]):.4f} vs lr 0 {mean(l0[h:]):.4f}; lr 0 weights stayed zero: {'yes' if not any(w0) else 'no'}")
+    else:
+        results["S9"] = "NOT TRIGGERED"
+        say(f"S9 NOT TRIGGERED | {len(log)} logged claims, 10 or more needed")
+
+    # S10 live: any run in this brain closed a gap opened earlier
+    from ddt.stores import gaps
+    g = gaps.all()
+    closed = [x for x in g if x["status"] == "closed"]
+    results["S10"] = "PASS" if closed else "NOT TRIGGERED"
+    say(f"S10 {results['S10']} | gaps in brain_verify: {len(g)} opened, {len(closed)} closed by a later run"
+        + "".join(f'\n  closed: "{x["text"]}" (opened by "{x["question"]}", closed by "{x["closed_by_question"]}")' for x in closed[:3]))
 
     # S7: a second Token Factory model, S3 rule on one question, no code change (a separate process)
     left = SEARCH_CAP - research.SEARCHES["total"]
