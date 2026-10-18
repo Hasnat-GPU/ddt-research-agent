@@ -1,10 +1,17 @@
-# DDT: a research agent that learns across runs
+# DDT: a digital twin inside the agent, aimed at continual learning
+
+DDT, the Digital-Digital Twin, gives an AI agent a twin of itself inside its own digital environment: an internal harness (memory, context, state, tools) and a metacognitive layer, stored as vectors with readable text, outside the model. The model's weights never change, so nothing it knows can be overwritten. Everything the agent learns goes into the twin, which is versioned and can be rolled back.
+
+**The research goal is continual learning without changing the model's weights. This repository is a first step, not a solution.** It was built in one day for the Nebius Build Week, where the track fixed the task: *Agentic Deep Research with Nebius Token Factory and Tavily* (also entered for *Best use of Nemotron*). So the twin is shown on a research agent. It turns a question into a cited report, keeps only claims whose quoted words are found on the source page, and answers repeat questions from the twin instead of searching again. The continual-learning work continues after the hackathon: see [docs/CONTINUAL-LEARNING.md](docs/CONTINUAL-LEARNING.md).
 
 **Status (18 October 2026, 17:05).** `main` carries the DDT vision harness. Hasnat merged it by his own decision although the project's own merge gate failed. S8 (Twin learns) failed in the latest stand-in run (2026-10-18 16:23:42, `DDT_FAKE=1`): mean absolute search-prediction error round 1 1.000, round 2 1.597; it must be lower in round 2. This code has no complete live `verify.py` run. The last version that passed every check live is tag `simple-verified` (commit 1dc2378).
 
-DDT turns a research question into a cited report. It keeps only claims whose quoted words are really found on the source page, and stores them in a versioned brain outside the model, so the next run starts from what it already knows. A self-model tracks, per topic, how often claims pass the quote check and raises the evidence bar when they don't.
+**Reliability fixes.** Seven fixes (F1 to F7), found and written by Codex (GPT Astra) in an in-project review (not an outside review), are on branch `reliability-fixes`, not merged: they did not pass a live run-pair check on 18 October 2026.
 
-Track: **Agentic Deep Research with Nebius Token Factory and Tavily**. Also entered for **Best use of Nemotron**: every planning, drafting and writing call runs NVIDIA Nemotron on Token Factory.
+| Read next | What it holds |
+| --- | --- |
+| [docs/VISION.md](docs/VISION.md) | The vision in plain words, mapped to the code |
+| [docs/CONTINUAL-LEARNING.md](docs/CONTINUAL-LEARNING.md) | The problem, what this build shows and does not, related work, the plan after the hackathon |
 
 ## Setup
 
