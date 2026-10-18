@@ -3,8 +3,8 @@ import numpy as np
 from ddt import agent, llm, research
 
 LICENCE_PART = "Under which licence are the Nemotron 3 models released?"
-SIZE_CLAIM = {"id": "aaaa1111", "text": "Nemotron 3 comes in Nano, Super and Ultra sizes."}
-LICENCE_CLAIM = {"id": "bbbb2222", "text": "Nemotron 3 is released under the NVIDIA Open Model License."}
+SIZE_CLAIM = {"id": "aaaa1111", "text": "Nemotron 3 comes in Nano, Super and Ultra sizes.", "source_url": "https://example.org/sizes"}
+LICENCE_CLAIM = {"id": "bbbb2222", "text": "Nemotron 3 is released under the NVIDIA Open Model License.", "source_url": "https://example.org/license"}
 
 
 def _embed(texts):
@@ -13,7 +13,7 @@ def _embed(texts):
 
 
 def test_plan_keeps_an_empty_answer_as_returned(monkeypatch):
-    monkeypatch.setattr(llm, "chat_json", lambda system, user: {"topic": "t", "parts": ["a"], "covered": [], "queries": []})
+    monkeypatch.setattr(llm, "chat_json", lambda system, user, validator: validator({"topic": "t", "parts": ["a"], "covered": [], "queries": []}))
     assert research.plan("q?", [SIZE_CLAIM], 1)["covered"] == []
 
 

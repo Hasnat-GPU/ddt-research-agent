@@ -21,8 +21,11 @@ def main() -> None:
     ap.add_argument("--no-brain", action="store_true", help="do not read or write the brain")
     ap.add_argument("--rollback", nargs="?", type=int, const=1, metavar="N", help="undo the last N brain versions")
     ap.add_argument("--stats", action="store_true", help="print the brain counts and the self-model")
+    ap.add_argument("--reindex", action="store_true", help="explicitly rebuild all brain vectors with the selected embedding model (may call Nebius)")
     a = ap.parse_args()
-    if a.rollback is not None:
+    if a.reindex:
+        print(f"brain reindexed at version {brain.reindex()}: {brain.counts()}")
+    elif a.rollback is not None:
         print(f"brain rolled back to version {brain.rollback(a.rollback)}: {brain.counts()}")
     elif a.stats:
         print(f"brain: {brain.counts()}")
@@ -51,4 +54,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Stats span several stores; keep that view consistent with research/undo.
+    with brain.lock():
+        main()

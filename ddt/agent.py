@@ -1,5 +1,6 @@
 """The DDT loop: Read, Predict, Plan, Act, Check, Write, Reflect, Compare, Report."""
 import re
+import uuid
 from datetime import datetime
 
 from . import brain, check, llm, metacog, selfmodel
@@ -17,8 +18,8 @@ Return plain text only."""
 class Trace:
     def __init__(self, stamp: str):
         self.lines = []
-        d = llm.ROOT / "traces"
-        d.mkdir(exist_ok=True)
+        d = llm.output_dir() / "traces"
+        d.mkdir(parents=True, exist_ok=True)
         self.path = _unique(d / f"{stamp}.log")
 
     def __call__(self, tag: str, text: str) -> None:
@@ -43,12 +44,16 @@ def _slug(text: str) -> str:
 
 
 def research(question: str, topic: str | None = None, use_brain: bool = True) -> dict:
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if not isinstance(question, str) or not question.strip() or len(question) > 4000:
+        raise ValueError("question must contain 1 to 4000 characters")
+    question = question.strip()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:12]
     trace = Trace(stamp)
-    web.SEARCHES["run"] = 0
     model = llm.MODEL_ID
     try:
-        return _run(question, topic, use_brain, model, stamp, trace)
+        with brain.lock(), llm.embedding_session(use_brain):
+            web.SEARCHES["run"] = 0
+            return _run(question, topic, use_brain, model, stamp, trace)
     finally:
         trace.save()
 
@@ -69,11 +74,10 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
             trace("READ", f'topic from the closest known claim: "{topic}"')
         if topic is not None:
             trace("READ", f'evidence bar for "{topic}": {selfmodel.get(topic)["evidence_bar"]}')
-        open_gaps = [(g, s) for g, s in gaps.search(qvec, k=10, min_sim=0.6) if g["status"] == "open"][:5]
+        open_gaps = gaps.search(qvec, k=5, min_sim=0.6, predicate=lambda g: g["status"] == "open")
         trace("STATE", "open from before: " + ("; ".join(f'{g["id"]} sim {s}: {g["text"]}' for g, s in open_gaps) or "none"))
-        for t, s in tools.search(qvec, k=20, min_sim=0.6):
-            if t["yield"] >= 1 and t["query"] not in past_queries and len(past_queries) < 3:
-                past_queries.append(t["query"])
+        past_queries = [t["query"] for t, _ in tools.search(
+            qvec, k=3, min_sim=0.6, predicate=lambda t: t["yield"] >= 1, distinct="query")]
         trace("TOOLS", f"past queries offered: {past_queries or 'none'}")
 
     # 2. Predict: the inner environment forecasts the run before acting
@@ -94,15 +98,17 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
         trace("PLAN", f'topic from the plan: "{topic}" | evidence bar {bar}')
     covered = [c for c in known if c["id"] in p["covered"]]
     trace("PLAN", f"parts: {p['parts']}")
-    if known and not covered and not p["queries"]:  # a plan that neither uses memory nor searches contradicts itself
-        covered, p["queries"] = repair_plan(p["parts"], known)
-        trace("META", f"plan had no covered claims and no queries: repaired by cosine {ANSWERED} or more: "
-                      f"covered {[c['id'] for c in covered] or 'none'}, queries {p['queries'] or 'none'}")
-    if covered and p["queries"]:  # regulation rule 3: queries only for parts no known claim answers
-        sims = llm.embed(p["parts"]) @ llm.embed([c["text"] for c in covered]).T
-        if float(sims.max(axis=1).min()) >= ANSWERED:
-            trace("META", f"every part is answered by a covered claim (cosine {ANSWERED} or more): queries dropped {p['queries']}")
+    if covered or (known and not p["queries"]):
+        # Recheck against the final bar, including one discovered with the topic.
+        # Do not override a planner that explicitly rejected nearby claims.
+        covered, missing = repair_plan(p["parts"], covered or known, bar)
+        if missing:
+            p["queries"] = missing[:3]
+        else:
             p["queries"] = []
+        trace("META", f"coverage checked against {bar} distinct source(s) per part; queries {p['queries'] or 'none'}")
+    elif not p["queries"]:
+        p["queries"] = p["parts"][:3]
     trace("PLAN", f'topic "{topic}" | covered by known claims: {[c["id"] for c in covered] or "none"}')
     trace("PLAN", f"queries: {p['queries'] or 'none'}")
 
@@ -135,9 +141,10 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
 
     # 5. Check, with the online claim model's prediction before each check and its update after
     passed, failed = [], []
-    state, domains = metacog.load(), metacog.domain_pass_rates()
+    state, domain_counts, checks = metacog.load(), metacog.domain_counts(), []
     cvecs = llm.embed([c["text"] for c in drafted]) if drafted else []
     for c, cv in zip(drafted, cvecs):
+        domains = {d: ok / total for d, (ok, total) in domain_counts.items()}
         x = metacog.features(c, cv, qvec, domains, topic)
         pp = metacog.p_pass(x, state["w"])
         trace("META", f"p_pass {pp:.2f}" + (" | low confidence" if pp < 0.2 else ""))
@@ -146,8 +153,13 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
         trace("CHECK", f'{"PASS" if ok else "FAIL"} {c["source_url"]} | "{c["quote"]}"')
         if use_brain:
             metacog.learn(x, ok, state)
+        metacog.record_outcome(domain_counts, c["source_url"], ok)
+        checks.append({"url": c["source_url"], "passed": ok})
 
     used = covered + passed
+    _, unresolved = repair_plan(p["parts"], used, bar)
+    if unresolved:
+        trace("DECIDE", f"incomplete evidence after quote checking: {unresolved}")
     n = len(passed) + len(failed)
     actual = {"searches": web.SEARCHES["run"], "passed": len(passed), "failed": len(failed),
               "pass_rate": round(len(passed) / n, 3) if n else None}
@@ -157,11 +169,13 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
     opened = closed = 0
     if use_brain:
         with brain.batch():
-            added, merged = brain.add_claims(passed, topic, model)
+            llm.record_embedding()
+            new_ids = []
+            added, merged = brain.add_claims(passed, topic, model, ids=new_ids)
             brain.add_run({"question": question, "topic": topic, "searches": web.SEARCHES["run"],
                            "passed": len(passed), "added": added, "merged": merged,
                            "failed": [{"text": c["text"], "url": c["source_url"], "quote": c["quote"]} for c in failed],
-                           "evidence_bar": bar, "model": model})
+                            "evidence_bar": bar, "model": model, "checks": checks})
             metacog.save(state)
             uvecs = llm.embed([c["text"] for c in used]) if used else None
             for g in gaps.all():  # close earlier gaps that a checked claim now answers
@@ -172,7 +186,7 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
             for part, pv in zip(p["parts"], pvecs):  # open a gap for every part no checked claim answers
                 if uvecs is not None and float((uvecs @ pv).max()) >= ANSWERED:
                     continue
-                if any(g["status"] == "open" for g, _ in gaps.search(pv, k=1, min_sim=0.95)):
+                if gaps.search(pv, k=1, min_sim=0.95, predicate=lambda g: g["status"] == "open"):
                     continue
                 gaps.add({"text": part, "question": question, "topic": topic, "status": "open"}, pv)
                 opened += 1
@@ -182,7 +196,7 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
                     tools.add({"query": q, "question": question, "topic": topic, "results": len(urls),
                                "yield": sum(c["source_url"] in urls for c in passed)}, qv)
             episodes.add({"question": question, "topic": topic, "parts": p["parts"], "known": len(known),
-                          "claims_used": [c["id"] for c in covered], "new_claims": len(passed),
+                          "claims_used": list(dict.fromkeys([c["id"] for c in covered] + new_ids)), "new_claims": len(passed),
                           "prediction": pred, "actual": actual, "error": err, "model": model}, qvec)
             trace("WRITE", f"{added} claims added, {merged} merged, {len(failed)} failed logged | brain version {brain.version()}")
             trace("STATE", f"gaps opened: {opened}, closed: {closed}")
@@ -198,19 +212,32 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
 
     # 8. Report
     harness = {"prediction": pred, "actual": actual, "error": err, "opened": opened, "closed": closed,
-               "open_from_before": [g["id"] for g, _ in open_gaps], "past_queries": past_queries}
+               "open_from_before": [g["id"] for g, _ in open_gaps], "past_queries": past_queries,
+               "unresolved_parts": unresolved, "complete": not unresolved}
     report = _report(question, topic, model, bar, used, covered, passed, failed, stamp, harness)
-    trace("REPORT", f"{report.relative_to(llm.ROOT)} | {len(used)} cited claims, {web.SEARCHES['run']} searches")
+    trace("REPORT", f"{report.relative_to(llm.output_dir())} | {len(used)} cited claims, {web.SEARCHES['run']} searches")
     return {"report_path": str(report), "trace_path": str(trace.path), "searches": web.SEARCHES["run"],
             "known": len(covered), "new": len(passed), "dropped": len(failed), "evidence_bar": bar,
             "topic": topic, "model": model, "citations": sorted({c["source_url"] for c in used}), **harness}
 
 
-def repair_plan(parts: list[str], known: list[dict]) -> tuple[list[dict], list[str]]:
-    """Covered: the known claims that answer a part. Queries: the parts no known claim answers (at most 3)."""
+def repair_plan(parts: list[str], known: list[dict], evidence_bar: int = 1) -> tuple[list[dict], list[str]]:
+    """Similarity-based coverage with a distinct-source requirement per part."""
+    if not known:
+        return [], list(parts)
     sims = llm.embed(parts) @ llm.embed([c["text"] for c in known]).T
     covered = [c for j, c in enumerate(known) if float(sims[:, j].max()) >= ANSWERED]
-    return covered, [part for i, part in enumerate(parts) if float(sims[i].max()) < ANSWERED][:3]
+    missing = []
+    for i, part in enumerate(parts):
+        urls = set()
+        for j, c in enumerate(known):
+            if float(sims[i, j]) >= ANSWERED:
+                if c.get("source_url"):
+                    urls.add(c["source_url"])
+                urls.update(c.get("also_sources", []))
+        if len(urls) < evidence_bar:
+            missing.append(part)
+    return covered, missing
 
 
 def _report(question, topic, model, bar, claims, covered, passed, failed, stamp, harness):
@@ -236,9 +263,11 @@ def _report(question, topic, model, bar, claims, covered, passed, failed, stamp,
               f"- Actual: pass rate {ac['pass_rate'] if ac['pass_rate'] is not None else 'n/a (no new claims)'}, {ac['searches']} searches",
               f"- Error: pass rate {er['pass_rate'] if er['pass_rate'] is not None else 'n/a'}, searches {er['searches']}",
               f"- Gaps: {len(harness['open_from_before'])} open from before, {harness['opened']} opened, {harness['closed']} closed",
-              f"- Past queries offered: {', '.join(harness['past_queries']) or 'none'}"]
-    d = llm.ROOT / "reports"
-    d.mkdir(exist_ok=True)
+              f"- Past queries offered: {', '.join(harness['past_queries']) or 'none'}",
+              "", "## Evidence still needed", "",
+              *([f"- {part}" for part in harness["unresolved_parts"]] or ["None under the configured coverage rule."])]
+    d = llm.output_dir() / "reports"
+    d.mkdir(parents=True, exist_ok=True)
     path = _unique(d / f"{stamp}-{_slug(question)}.md")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

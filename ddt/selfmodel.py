@@ -20,6 +20,9 @@ def get(topic: str) -> dict:
 
 
 def update(topic: str, results: list[bool], searches: int, model: str) -> str:
+    if not brain.in_batch():
+        with brain.batch():
+            return update(topic, results, searches, model)
     brain.before_write()
     data = load()
     e = get(topic)

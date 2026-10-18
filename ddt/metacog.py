@@ -50,6 +50,9 @@ def load() -> dict:
 
 
 def save(state: dict) -> None:
+    if not brain.in_batch():
+        with brain.batch():
+            return save(state)
     brain.before_write()
     _path().write_text(json.dumps(state), encoding="utf-8")
 
@@ -67,15 +70,34 @@ def p_pass(x: list[float], w: list[float]) -> float:
 
 
 def domain_pass_rates() -> dict:
-    """Passed share of earlier checked claims per web domain, from the brain's claims and failed runs."""
+    return {d: p / n for d, (p, n) in domain_counts().items()}
+
+
+def domain_counts() -> dict:
+    """Exact counts for runs with check history; legacy successes are unknown.
+
+    Do not invent repeated successful checks from deduplicated legacy claims.
+    Only explicit check outcomes contribute to the current feature.
+    """
     counts = {}
     for e in brain.entries():
-        urls = [(e["source_url"], 1)] if e["kind"] == "claim" else [(f["url"], 0) for f in e.get("failed", [])]
-        for url, ok in urls:
-            c = counts.setdefault(urlparse(url).netloc, [0, 0])
-            c[0] += ok
-            c[1] += 1
-    return {d: p / n for d, (p, n) in counts.items()}
+        for outcome in e.get("checks", []) if e["kind"] == "run" else []:
+            record_outcome(counts, outcome["url"], outcome["passed"])
+    return counts
+
+
+def record_outcome(counts, url, passed):
+    c = counts.setdefault(urlparse(url).netloc, [0, 0])
+    c[0] += int(passed)
+    c[1] += 1
+
+
+def update_weights(w, x, y, learning_rate):
+    """Pure production/replay update, with the pre-update prediction."""
+    if len(w) != 6 or len(x) != 6 or not all(math.isfinite(v) for v in [*w, *x, learning_rate]) or learning_rate < 0:
+        raise ValueError("invalid online learning state")
+    p = p_pass(x, w)
+    return [wi + learning_rate * (int(y) - p) * xi for wi, xi in zip(w, x)], p
 
 
 def features(claim: dict, claim_vec, question_vec, domains: dict, topic: str) -> list[float]:
@@ -88,12 +110,15 @@ def features(claim: dict, claim_vec, question_vec, domains: dict, topic: str) ->
 
 def learn(x: list[float], y: bool, state: dict | None = None) -> dict:
     """Log x, y and the prediction, then one gradient step: w += lr * (y - p) * x."""
+    if state is None and not brain.in_batch():
+        with brain.batch():
+            return learn(x, y)
     own = state is None
     state = load() if own else state
-    p = p_pass(x, state["w"])
+    weights, p = update_weights(state["w"], x, y, lr())
     state["log"] = (state["log"] + [{"x": x, "y": int(y), "p": round(p, 4)}])[-500:]
     state["lr"] = lr()
-    state["w"] = [w + state["lr"] * (int(y) - p) * xi for w, xi in zip(state["w"], x)]
+    state["w"] = weights
     if own:
         save(state)
     return state

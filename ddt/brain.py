@@ -6,27 +6,46 @@ the harness stores episodes, gaps and tools (.jsonl + .npy each), meta.json ({"v
 """
 import json
 import os
-import shutil
 import uuid
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from . import llm
+from . import llm, persistence
 
 FILES = ["brain.jsonl", "brain.npy", "selfmodel.json", "metacog.json", "episodes.jsonl", "episodes.npy",
-         "gaps.jsonl", "gaps.npy", "tools.jsonl", "tools.npy"]
+          "gaps.jsonl", "gaps.npy", "tools.jsonl", "tools.npy", "embedding.json"]
 MERGE_SIM = 0.95
-_batch = {"open": False}
+_local = threading.local()
+
+
+def _root_dir() -> Path:
+    d = Path(os.environ.get("DDT_BRAIN_DIR", "brain"))
+    d = d if d.is_absolute() else llm.ROOT / d
+    return d.resolve()
+
+
+@contextmanager
+def lock():
+    root = _root_dir()
+    with persistence.locked(root):
+        if not in_batch():
+            persistence.recover(root, FILES + ["meta.json"])
+        yield
+
+
+def in_batch() -> bool:
+    return getattr(_local, "stage", None) is not None
 
 
 def brain_dir() -> Path:
-    d = Path(os.environ.get("DDT_BRAIN_DIR", "brain"))
-    d = d if d.is_absolute() else llm.ROOT / d
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    if in_batch():
+        return _local.stage
+    with lock():
+        return _root_dir()
 
 
 def version() -> int:
@@ -39,33 +58,54 @@ def _set_version(n: int) -> None:
 
 
 def snapshot() -> int:
-    """Copy the brain files to versions/v<current version>/, then add 1 to the version."""
-    d, v = brain_dir(), version()
-    snap = d / "versions" / f"v{v}"
-    if snap.exists():
-        shutil.rmtree(snap)
-    snap.mkdir(parents=True)
-    for f in FILES:
-        if (d / f).exists():
-            shutil.copy2(d / f, snap / f)
-    _set_version(v + 1)
-    return v + 1
+    """Publish an empty version; ordinary mutations use batch()."""
+    with batch():
+        return version()
 
 
 @contextmanager
 def batch():
-    """One snapshot for several writes: one research run is one brain version."""
-    snapshot()
-    _batch["open"] = True
-    try:
-        yield
-    finally:
-        _batch["open"] = False
+    """Stage one version and publish it only after all writes validate."""
+    if in_batch():
+        raise RuntimeError("nested brain batches are not supported")
+    with lock():
+        root, v = _root_dir(), version()
+        persistence.copy_files(root, root / "versions" / f"v{v}", FILES)
+        with persistence.transaction(root, FILES + ["meta.json"]) as stage:
+            _local.stage = stage
+            try:
+                _set_version(v + 1)
+                yield
+                _validate()
+            finally:
+                _local.stage = None
+
+
+def _validate():
+    d = brain_dir()
+    dimensions = set()
+    for name in ("brain", "episodes", "gaps", "tools"):
+        p, pv = d / f"{name}.jsonl", d / f"{name}.npy"
+        items = [json.loads(s) for s in p.read_text(encoding="utf-8").splitlines() if s] if p.exists() else []
+        rows = sum(e["kind"] == "claim" for e in items) if name == "brain" else len(items)
+        vecs = np.load(pv, allow_pickle=False) if pv.exists() else None
+        if (vecs is None and rows) or (vecs is not None and (vecs.ndim != 2 or len(vecs) != rows or not np.isfinite(vecs).all())):
+            raise RuntimeError(f"invalid row/vector alignment in {name}")
+        if vecs is not None and len(vecs):
+            dimensions.add(vecs.shape[1])
+    if len(dimensions) > 1:
+        raise RuntimeError("brain stores use different embedding dimensions")
+    identity = d / "embedding.json"
+    if identity.exists() and dimensions and dimensions != {json.loads(identity.read_text(encoding="utf-8"))["dimension"]}:
+        raise RuntimeError("embedding identity does not match stored dimensions")
+    for name in ("selfmodel.json", "metacog.json", "embedding.json", "meta.json"):
+        if (d / name).exists():
+            json.loads((d / name).read_text(encoding="utf-8"))
 
 
 def before_write() -> None:
-    if not _batch["open"]:
-        snapshot()
+    if not in_batch():
+        raise RuntimeError("brain writes require a batch")
 
 
 def entries() -> list[dict]:
@@ -89,13 +129,17 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def add_claims(claims: list[dict], topic: str, model: str) -> tuple[int, int]:
+def add_claims(claims: list[dict], topic: str, model: str, *, ids: list[str] | None = None) -> tuple[int, int]:
     """Merge a claim into a stored one at cosine similarity 0.95 or more; append every other claim."""
     if not claims:
         return 0, 0
+    if not in_batch():
+        with batch():
+            return add_claims(claims, topic, model, ids=ids)
     before_write()
     items, vecs = entries(), vectors()
     new_vecs = llm.embed([c["text"] for c in claims])
+    llm.record_embedding()
     claim_items = [e for e in items if e["kind"] == "claim"]
     if vecs is not None and vecs.shape[1] != new_vecs.shape[1]:
         raise RuntimeError("embedding size differs from the stored vectors; use the same embedding model")
@@ -109,6 +153,8 @@ def add_claims(claims: list[dict], topic: str, model: str) -> tuple[int, int]:
                 if c["source_url"] != e["source_url"] and c["source_url"] not in e["also_sources"]:
                     e["also_sources"].append(c["source_url"])
                 merged += 1
+                if ids is not None:
+                    ids.append(e["id"])
                 continue
         e = {"id": uuid.uuid4().hex[:8], "kind": "claim", "text": c["text"], "topic": topic,
              "source_url": c["source_url"], "also_sources": [], "quote": c["quote"],
@@ -118,11 +164,16 @@ def add_claims(claims: list[dict], topic: str, model: str) -> tuple[int, int]:
         claim_items.append(e)
         vecs = v[None, :] if vecs is None else np.vstack([vecs, v[None, :]])
         added += 1
+        if ids is not None:
+            ids.append(e["id"])
     _save(items, vecs)
     return added, merged
 
 
 def add_run(record: dict) -> None:
+    if not in_batch():
+        with batch():
+            return add_run(record)
     before_write()
     items = entries()
     items.append({"id": uuid.uuid4().hex[:8], "kind": "run", "origin": "run", "version": version(),
@@ -148,19 +199,50 @@ def retrieve(question: str, k: int = 5, min_sim: float = 0.75, vec=None) -> list
 
 def rollback(steps: int = 1) -> int:
     """Restore versions/v<version - steps>/ and make it the current version."""
-    d, target = brain_dir(), version() - steps
-    snap = d / "versions" / f"v{target}"
-    if target < 0 or not snap.exists():
-        raise ValueError(f"no snapshot for version {target}")
-    for f in FILES:
-        (d / f).unlink(missing_ok=True)
-        if (snap / f).exists():
-            shutil.copy2(snap / f, d / f)
-    _set_version(target)
-    return target
+    if type(steps) is not int or steps <= 0:
+        raise ValueError("rollback steps must be a positive integer")
+    if in_batch():
+        raise RuntimeError("cannot roll back during a batch")
+    with lock():
+        d, target = _root_dir(), version() - steps
+        snap = d / "versions" / f"v{target}"
+        if target < 0 or not snap.exists():
+            raise ValueError(f"no snapshot for version {target}")
+        with persistence.transaction(d, FILES + ["meta.json"]) as stage:
+            _local.stage = stage
+            try:
+                persistence.copy_files(snap, stage, FILES)
+                _set_version(target)
+                _validate()
+            finally:
+                _local.stage = None
+        return target
 
 
 def counts() -> dict:
     items = entries()
     return {"claims": sum(e["kind"] == "claim" for e in items),
             "runs": sum(e["kind"] == "run" for e in items), "version": version()}
+
+
+def reindex() -> int:
+    """Explicitly rebuild every vector store with the selected embedding model.
+
+    IDs and readable records stay unchanged. The entire migration is one
+    recoverable version, including embedding identity, and can be rolled back.
+    """
+    with lock(), llm.embedding_session(use_brain=False), batch():
+        d = brain_dir()
+        for name, field in (("brain", "text"), ("episodes", "question"), ("gaps", "text"), ("tools", "query")):
+            p = d / f"{name}.jsonl"
+            items = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line] if p.exists() else []
+            if name == "brain":
+                items = [e for e in items if e["kind"] == "claim"]
+            if items:
+                vecs = llm.embed([e[field] for e in items])
+                np.save(d / f"{name}.npy", vecs)
+            else:
+                (d / f"{name}.npy").unlink(missing_ok=True)
+        llm.record_embedding()
+        new_version = version()
+    return new_version

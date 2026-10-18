@@ -1,6 +1,6 @@
 # DDT: a research agent that learns across runs
 
-**Status (18 October 2026, 17:05).** `main` carries the DDT vision harness. Hasnat merged it by his own decision although the project's own merge gate failed. S8 (Twin learns) failed in the latest stand-in run (2026-10-18 16:23:42, `DDT_FAKE=1`): mean absolute search-prediction error round 1 1.000, round 2 1.597; it must be lower in round 2. This code has no complete live `verify.py` run. The last version that passed every check live is tag `simple-verified` (commit 1dc2378).
+**Published baseline status (18 October 2026, 17:05).** `main` carries the DDT vision harness. Hasnat merged it by his own decision although the project's own merge gate failed. S8 (Twin learns) failed in the recorded stand-in run (2026-10-18 16:23:42, `DDT_FAKE=1`): mean absolute search-prediction error round 1 1.000, round 2 1.597; it must be lower in round 2. This code has no complete live `verify.py` run. The last version that passed every check live is tag `simple-verified` (commit 1dc2378).
 
 DDT turns a research question into a cited report. It keeps only claims whose quoted words are really found on the source page, and stores them in a versioned brain outside the model, so the next run starts from what it already knows. A self-model tracks, per topic, how often claims pass the quote check and raises the evidence bar when they don't.
 
@@ -27,7 +27,7 @@ Open `.env` and fill the two keys: `NEBIUS_API_KEY` (Nebius Token Factory) and `
 python run.py "What model sizes does the NVIDIA Nemotron 3 family include?"
 ```
 
-The trace prints live; the cited report is written to `reports/` and the trace to `traces/`. Run the same command a second time: the agent answers from its brain, with the same citations and no search.
+The trace prints live; the cited report is written to `reports/` and the trace to `traces/`. Run the same command a second time to test reuse: when stored claims cover the question at the required evidence bar, the agent can answer without another search.
 
 Other commands:
 
@@ -38,7 +38,13 @@ python run.py --stats                                # brain counts and the self
 python run.py --rollback 1                           # undo the last run (one brain version)
 ```
 
-Offline, with deterministic stand-ins instead of the model and the web: set `DDT_FAKE=1`, then `pytest` or `python verify.py --fake`.
+Offline, with deterministic stand-ins instead of the model and the web: set `DDT_FAKE=1`, then `pytest` or `python verify.py --fake`. Offline mode skips `.env` entirely. To skip `.env` in another process explicitly, set `DDT_SKIP_DOTENV=1`.
+
+Verification now writes `results.md`, `results.json`, brains, reports and traces into a new `verification/<run-id>/` directory. Use `python verify.py --fake --output-dir verification/my-new-run` to choose a directory; it must not already exist. Failed, void, broken-control or missing required checks return a nonzero process exit. Only S5 and S10 may be NOT TRIGGERED. `DDT_OUTPUT_DIR` can independently relocate ordinary reports and traces.
+
+Memory writes are staged and validated, then published under an exclusive process lock. An interrupted pending publication restores the previous committed files when the brain is next opened. Rollback uses the same journal and requires a positive step count. Research and CLI stats hold the lock while accessing a run's state. This protects the tested exception/process-interruption cases; behavior during hardware or filesystem failure has not been measured.
+
+Each new brain records its embedding provider/model/dimension in `embedding.json`. A failed remote embedding request now fails the run instead of silently switching vector spaces. Local embeddings require an explicitly selected separate brain (`DDT_EMBED=local`). Existing brains without that identity are preserved but cannot accept new embedding-based runs until explicitly reindexed; run `python run.py --reindex` only when ready to rebuild all stores using the selected embedding model. That explicit command may call Nebius, preserves record IDs, creates one undoable version, and leaves the old state intact if reindexing fails. Alternatively choose a new `DDT_BRAIN_DIR` to continue without altering an older brain. Historical check counts cannot be reconstructed from deduplicated claims; domain rates use explicit per-check history from new runs.
 
 ## How it works
 
@@ -84,7 +90,7 @@ New trace tags in the loop:
 | [STATE] | Read, Write | Retrieves open gaps from earlier runs (cosine similarity 0.6 or more) for the planner; in Write, opens a gap for any planned part no checked claim answers (similarity 0.75 or more) and closes earlier open gaps now answered. |
 | [TOOLS] | Read | Retrieves up to 3 past search queries for similar questions (similarity 0.6 or more) with yield 1 or more, and offers them to the planner. |
 | [PREDICT] | Predict | Forecasts the run's pass rate and search count from the 5 nearest episodes (similarity 0.6 or more), or from the prior (pass rate 0.7; 3 searches if 0 known claims, else 0). |
-| [META] | Plan, Check | Raises the run's evidence bar to 2 before planning if the predicted pass rate is below 0.6. Before each quote check, logs `p_pass = sigmoid(w · x)` from the 6-weight online claim model (adding `low confidence` below 0.2); after the check, updates `w += lr * (y - p) * x`. In Plan: if the plan names no covered claim and no query although claims are known, it is repaired by cosine (a known claim at 0.75 or more to a part covers it; uncovered parts become queries); if every part has a covered claim at 0.75 or more, the plan's queries are dropped. |
+| [META] | Plan, Check | Raises the run's evidence bar to 2 before planning if the predicted pass rate is below 0.6. Before each quote check, logs `p_pass = sigmoid(w · x)` from the 6-weight online claim model (adding `low confidence` below 0.2); after the check, updates `w += lr * (y - p) * x`. In Plan: a contradictory empty plan can be repaired using cosine similarity. Declared coverage is checked against the final evidence bar using distinct source URLs; insufficiently supported parts retain searches. An explicit planner decision to search is not replaced with nearby rejected claims. After quote checking, the report lists any parts that still lack enough evidence. Similarity remains a coverage heuristic, not proof that a claim answers a part. |
 | [COMPARE] | Compare | Computes the absolute errors between predicted and actual pass rate and searches, and stores them in the episode. |
 
 Vision checks in `verify.py` (cap raised to 60 Tavily searches):
@@ -109,7 +115,7 @@ Limits of the vision harness: Nemotron's weights never change; what learns is th
 
 ## Verification
 
-`python verify.py` runs the checks below against Token Factory and Tavily, with at most 60 Tavily searches, prints PASS, FAIL or NOT TRIGGERED with the measured numbers, and appends them to the results file. A check counts only if it can fail, so there are two controls here; S8, S9 and S10 have their own controls (above).
+`python verify.py` runs the checks below against Token Factory and Tavily, with at most 60 Tavily searches, prints PASS, FAIL or NOT TRIGGERED with the measured numbers, and writes them to its isolated run directory. A check counts only if it can fail, so there are two controls here; S8, S9 and S10 have their own controls (above).
 
 | Check | Pass when |
 | --- | --- |
@@ -155,7 +161,7 @@ Summary: S5 stand-in PASS, S3 PASS, Failure control PASS, S4 PASS, S2 PASS, Cita
 | Tool | Used for |
 | --- | --- |
 | Nebius Token Factory, chat completions | Planning, drafting claims, writing the answer. Base URL `https://api.tokenfactory.nebius.com/v1` (OpenAI-compatible). Model `nvidia/nemotron-3-super-120b-a12b` (`NEBIUS_MODEL`); S7 also uses `nvidia/Nemotron-3.5-Super-VL`. |
-| Nebius Token Factory, embeddings | Claim and question vectors for the brain. Model `Qwen/Qwen3-Embedding-8B` (`NEBIUS_EMBED_MODEL`, 4096 dimensions). If the call fails or `DDT_EMBED=local`, a local 512-dimension hashed bag of words is used. |
+| Nebius Token Factory, embeddings | Claim and question vectors for the brain. Model `Qwen/Qwen3-Embedding-8B` (`NEBIUS_EMBED_MODEL`, 4096 dimensions). With `DDT_EMBED=local`, a separate local brain uses 512-dimension hashed bag-of-words vectors. Remote failures no longer fall back to a different embedding space. |
 | Tavily | `search` (advanced depth, 5 results, raw content) and `extract` (re-fetching a page for the quote check and S2). The agent's only access to the web. |
 | Python packages | `openai`, `tavily-python`, `numpy`, `python-dotenv`, `pytest`, versions pinned in `requirements.txt`. |
 
@@ -168,6 +174,7 @@ Everything DDT learns is in `brain/` (or the folder in `DDT_BRAIN_DIR`). Nothing
 | `brain.jsonl` | One JSON entry per line, readable. |
 | `brain.npy` | The claim vectors: row i belongs to the i-th claim entry. |
 | `selfmodel.json` | Per topic: `runs`, `checked`, `passed`, `last5` (latest pass/fail results), `searches`, `evidence_bar`, `models`. |
+| `embedding.json` | Embedding provider, model, normalization and dimension; versioned with the brain. |
 | `meta.json` | `{"version": N}`, the current brain version. |
 | `episodes.jsonl` + `episodes.npy` | One episode per run with its question vector: parts, claims used, prediction, actual, error. |
 | `gaps.jsonl` + `gaps.npy` | Open and closed gaps with their vectors. |

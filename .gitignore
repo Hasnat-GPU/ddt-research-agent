@@ -5,5 +5,7 @@ __pycache__/
 brain/
 brain_*/
 .pytest_cache/
+.test-artifacts/
+verification/
 reports/
 traces/

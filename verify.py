@@ -1,5 +1,5 @@
-"""Runs checks S2 to S7 and both controls, prints PASS, FAIL or NOT TRIGGERED with the measured numbers,
-and appends a dated section to the results file.
+"""Runs checks S2 to S10 and controls, preserving measured results in an isolated
+run directory and returning nonzero for failed, void or missing required checks.
 
 python verify.py           live: Nebius Token Factory and Tavily, at most 60 Tavily searches
 python verify.py --fake    the same checks with the offline stand-ins (no network)
@@ -17,17 +17,19 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent
+WORK_ROOT = ROOT
 SEARCH_CAP = 60
 S10_Q1 = "What sizes does the Nemotron family come in and what are the Nemotron benchmark results?"
 S10_Q2 = "What are the Nemotron benchmark results?"
 MADE_UP_QUOTE = "the purple elephant negotiated quarterly tariffs with seventeen lunar bakeries on tuesday morning"
-RESULTS_FILE = ROOT.parent / "Testing" / "results.md" if (ROOT.parent / "Testing").is_dir() else ROOT / "results.md"
 
 lines: list[str] = []
 
@@ -38,8 +40,11 @@ def say(text: str) -> None:
 
 
 def fresh_brain(name: str) -> None:
-    shutil.rmtree(ROOT / name, ignore_errors=True)
-    os.environ["DDT_BRAIN_DIR"] = name
+    target = (WORK_ROOT / name).resolve()
+    if target.parent != WORK_ROOT.resolve() or not name.startswith("brain_"):
+        raise ValueError("verification brain must stay inside its run directory")
+    shutil.rmtree(target, ignore_errors=True)
+    os.environ["DDT_BRAIN_DIR"] = str(target)
 
 
 def s3_rule(first: dict, second: dict) -> bool:
@@ -79,18 +84,63 @@ def replay(log: list[dict], lr: float) -> tuple[list[float], list[float]]:
     from ddt import metacog
     w, losses = [0.0] * 6, []
     for e in log:
-        p = min(max(metacog.p_pass(e["x"], w), 1e-6), 1 - 1e-6)
+        w, prediction = metacog.update_weights(w, e["x"], e["y"], lr)
+        p = min(max(prediction, 1e-6), 1 - 1e-6)
         losses.append(-math.log(p) if e["y"] else -math.log(1 - p))
-        w = [wi + lr * (e["y"] - p) * xi for wi, xi in zip(w, e["x"])]
     return losses, w
 
 
-def main() -> None:
+REQUIRED = {"S5 stand-in", "S10 stand-in", "S10 control", "S3", "Failure control",
+            "S4", "S8", "S2", "Citation control", "S6", "S5", "S9", "S10", "S7"}
+
+
+def result_exit_code(results: dict, fake: bool) -> int:
+    # The same explicit allowances apply in both modes; S9 is required.
+    allowed_not_triggered = {"S5", "S10"}
+    if not REQUIRED <= results.keys():
+        return 1
+    return int(any(status != "PASS" and not (name in allowed_not_triggered and status == "NOT TRIGGERED")
+                   for name, status in results.items()))
+
+
+def main(argv=None) -> int:
+    global WORK_ROOT
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fake", action="store_true", help="use the offline stand-ins")
-    a = ap.parse_args()
+    ap.add_argument("--fake", action="store_true", default=os.environ.get("DDT_FAKE") == "1",
+                    help="use the offline stand-ins (also enabled by DDT_FAKE=1)")
+    ap.add_argument("--output-dir", type=Path, help="isolated verification artifacts directory (must be new)")
+    a = ap.parse_args(argv)
     if a.fake:
         os.environ["DDT_FAKE"] = "1"
+        os.environ["DDT_SKIP_DOTENV"] = "1"
+    WORK_ROOT = (a.output_dir or ROOT / "verification" / uuid.uuid4().hex).resolve()
+    # Never delete an existing user's verification run or learned brain.
+    WORK_ROOT.mkdir(parents=True, exist_ok=False)
+    os.environ["DDT_OUTPUT_DIR"] = str(WORK_ROOT)
+    lines.clear()
+    results = {}
+    stamp = datetime.now().isoformat(sep=" ", timespec="seconds")
+    try:
+        _checks(a, results)
+    except (Exception, KeyboardInterrupt) as exc:
+        results["Run error"] = "FAIL"
+        say(f"STOPPED: {type(exc).__name__}; partial results retained")
+    finally:
+        if "CONTROL BROKEN" in results.values():
+            say("CONTROL BROKEN: every result of this run is void.")
+        missing = sorted(REQUIRED - results.keys())
+        if missing:
+            say("Missing required results: " + ", ".join(missing))
+        say("Summary: " + ", ".join(f"{k} {v}" for k, v in results.items()))
+        (WORK_ROOT / "results.md").write_text(
+            f"## {stamp} ({'stand-ins' if a.fake else 'live'})\n\n```\n" + "\n".join(lines) + "\n```\n", encoding="utf-8")
+        (WORK_ROOT / "results.json").write_text(json.dumps({"mode": "fake" if a.fake else "live", "results": results,
+            "exit_code": result_exit_code(results, a.fake)}, indent=2), encoding="utf-8")
+        print(f"results saved in {WORK_ROOT}")
+    return result_exit_code(results, a.fake)
+
+
+def _checks(a, results):
     from ddt import agent, brain, check, llm, research
     research.SEARCH_CAP = SEARCH_CAP
     qs = json.loads((ROOT / "tests" / "questions.json").read_text(encoding="utf-8"))
@@ -98,7 +148,6 @@ def main() -> None:
     stamp = datetime.now().isoformat(sep=" ", timespec="seconds")
     say(f"verify.py run {stamp} | {'stand-ins (DDT_FAKE=1)' if a.fake else 'live'} | model {llm.MODEL_ID} | "
         f"embedding {os.environ.get('NEBIUS_EMBED_MODEL')} | Tavily cap {SEARCH_CAP} searches")
-    results: dict[str, str] = {}
     first, second = {}, {}
 
     # S5 stand-in first, so its stand-in searches do not count against the live cap
@@ -137,7 +186,7 @@ def main() -> None:
         # S3: each set A question with the brain, then each again
         say("--- S3 runs ---")
         fresh_brain("brain_verify")
-        shutil.rmtree(ROOT / "brain_s6", ignore_errors=True)
+        shutil.rmtree(WORK_ROOT / "brain_s6", ignore_errors=True)
         for q in A["questions"]:
             first[q] = agent.research(q, topic=A["topic"])
         for q in A["questions"]:
@@ -162,12 +211,12 @@ def main() -> None:
 
         # S4: research set B, then ask set A again
         say("--- S4 runs ---")
-        os.environ["DDT_BRAIN_DIR"] = "brain_verify"
+        os.environ["DDT_BRAIN_DIR"] = str(WORK_ROOT / "brain_verify")
         for q in B["questions"]:
             agent.research(q, topic=B["topic"])
             if [e for e in brain.entries() if e["kind"] == "run"][-1]["added"] > 0:  # S6 needs a run that added claims
-                shutil.rmtree(ROOT / "brain_s6", ignore_errors=True)
-                shutil.copytree(ROOT / "brain_verify", ROOT / "brain_s6")
+                shutil.rmtree(WORK_ROOT / "brain_s6", ignore_errors=True)
+                shutil.copytree(WORK_ROOT / "brain_verify", WORK_ROOT / "brain_s6")
         third = {q: agent.research(q, topic=A["topic"]) for q in A["questions"]}
         ok = all(s3_rule(first[q], third[q]) for q in A["questions"])
         results["S4"] = "PASS" if ok else "FAIL"
@@ -185,7 +234,8 @@ def main() -> None:
             f"({e1}), round 2 {mean(e2):.3f} ({e2}); control (brain off): {c1['error']['searches']} -> "
             f"{c2['error']['searches']}, lower in round 2: {'yes (S8 void)' if control_improved else 'no, as it must'}")
     except RuntimeError as e:
-        say(f"STOPPED: {e}")
+        results["Run error"] = "FAIL"
+        say(f"STOPPED: {type(e).__name__}")
 
     # S2 and the citation control: re-fetch the sources of the latest report with 3 or more sources
     reports = [r["report_path"] for r in list(first.values()) + list(second.values())]
@@ -215,8 +265,8 @@ def main() -> None:
         say("Citation control NOT RUN")
 
     # S6: roll back one version on a copy of the brain taken right after a set B run that added claims
-    if (ROOT / "brain_s6" / "brain.jsonl").exists():
-        os.environ["DDT_BRAIN_DIR"] = "brain_s6"
+    if (WORK_ROOT / "brain_s6" / "brain.jsonl").exists():
+        os.environ["DDT_BRAIN_DIR"] = str(WORK_ROOT / "brain_s6")
         v = brain.version()
         before = {e["id"]: e for e in brain.entries() if e["kind"] == "claim"}
         last = [e for e in brain.entries() if e["kind"] == "run"][-1]
@@ -234,11 +284,11 @@ def main() -> None:
         say("S6 NOT RUN | no set B run added claims")
 
     # S5 live: a topic where quotes often fail, run twice
-    os.environ["DDT_BRAIN_DIR"] = "brain_verify"
+    os.environ["DDT_BRAIN_DIR"] = str(WORK_ROOT / "brain_verify")
     try:
         status, numbers = s5_check(agent, qs["S5"]["question"], qs["S5"]["topic"])
     except RuntimeError as e:
-        status, numbers = "NOT RUN", str(e)
+        status, numbers = "NOT RUN", type(e).__name__
     results["S5"] = status
     say(f"S5 {status} | topic \"{qs['S5']['topic']}\": {numbers}")
 
@@ -262,7 +312,7 @@ def main() -> None:
     # S10 live: any run in this brain closed a gap opened earlier
     from ddt.stores import gaps
     g = gaps.all()
-    closed = [x for x in g if x["status"] == "closed"]
+    closed = [x for x in g if x["status"] == "closed" and x.get("closed_version", 0) > x["version"]]
     results["S10"] = "PASS" if closed else "NOT TRIGGERED"
     say(f"S10 {results['S10']} | gaps in brain_verify: {len(g)} opened, {len(closed)} closed by a later run"
         + "".join(f'\n  closed: "{x["text"]}" (opened by "{x["question"]}", closed by "{x["closed_by_question"]}")' for x in closed[:3]))
@@ -270,15 +320,17 @@ def main() -> None:
     # S7: a second Token Factory model, S3 rule on one question, no code change (a separate process)
     left = SEARCH_CAP - research.SEARCHES["total"]
     if left >= 4:
-        env = {**os.environ, "NEBIUS_MODEL": qs["S7"]["model"], "DDT_BRAIN_DIR": "brain_s7",
+        env = {**os.environ, "NEBIUS_MODEL": qs["S7"]["model"], "DDT_BRAIN_DIR": str(WORK_ROOT / "brain_s7"),
                "DDT_SEARCH_CAP": str(left), "PYTHONIOENCODING": "utf-8"}
-        shutil.rmtree(ROOT / "brain_s7", ignore_errors=True)
+        shutil.rmtree(WORK_ROOT / "brain_s7", ignore_errors=True)
         runs = []
         for _ in range(2):
             out = subprocess.run([sys.executable, "run.py", qs["S7"]["question"], "--topic", A["topic"]],
                                  cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
             res = [l for l in out.stdout.splitlines() if l.startswith("[RESULT] ")]
-            runs.append(json.loads(res[0][9:]) if res else None)
+            runs.append(json.loads(res[0][9:]) if res and out.returncode == 0 else None)
+            if runs[-1]:
+                env["DDT_SEARCH_CAP"] = str(max(0, int(env["DDT_SEARCH_CAP"]) - runs[-1]["searches"]))
         if all(runs):
             research.SEARCHES["total"] += runs[0]["searches"] + runs[1]["searches"]
             results["S7"] = "PASS" if s3_rule(*runs) else "FAIL"
@@ -286,19 +338,13 @@ def main() -> None:
             say(describe(qs["S7"]["question"], *runs))
         else:
             results["S7"] = "FAIL"
-            say(f"S7 FAIL | run.py with model {qs['S7']['model']} gave no result: {out.stderr[-300:]}")
+            say(f"S7 FAIL | run.py with model {qs['S7']['model']} gave no successful result; last process exit {out.returncode}")
     else:
         results["S7"] = "NOT RUN"
         say(f"S7 NOT RUN | only {left} searches left under the cap")
 
     say(f"Tavily searches used: {research.SEARCHES['total']} of {SEARCH_CAP}")
-    if "CONTROL BROKEN" in results.values():
-        say("CONTROL BROKEN: every result of this run is void.")
-    say("Summary: " + ", ".join(f"{k} {v}" for k, v in results.items()))
-    with RESULTS_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"\n## {stamp} ({'stand-ins' if a.fake else 'live'})\n\n```\n" + "\n".join(lines) + "\n```\n")
-    print(f"appended to {RESULTS_FILE}")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import math
 
 from . import llm
 
@@ -58,14 +59,31 @@ Rules:
 def plan(question: str, known_claims: list[dict], evidence_bar: int,
          open_gaps: list[str] | None = None, past_queries: list[str] | None = None) -> dict:
     user = json.dumps({"question": question, "evidence_bar": evidence_bar,
-                       "known_claims": [{"id": c["id"], "text": c["text"]} for c in known_claims],
+                       "known_claims": [{"id": c["id"], "text": c["text"], "source_url": c.get("source_url"),
+                                         "also_sources": c.get("also_sources", [])} for c in known_claims],
                        "open_gaps": open_gaps or [], "past_queries": past_queries or []})
-    out = llm.chat_json(PLAN_SYSTEM, user)
     known_ids = {c["id"] for c in known_claims}
-    parts = [str(x) for x in (out.get("parts") or []) if str(x).strip()][:4] or [question]
-    return {"topic": str(out.get("topic") or "").strip().lower(), "parts": parts,
-            "covered": [i for i in out.get("covered") or [] if i in known_ids],
-            "queries": [str(q) for q in (out.get("queries") or [])][:3]}
+    def validate(out):
+        topic = _text(out["topic"], allow_empty=True).lower()
+        parts = _strings(out["parts"], 4, minimum=1)
+        covered = _strings(out["covered"], len(known_ids))
+        if not set(covered) <= known_ids:
+            raise ValueError("unknown covered claim ID")
+        return {"topic": topic, "parts": parts, "covered": covered,
+                "queries": _strings(out["queries"], 3)}
+    return llm.chat_json(PLAN_SYSTEM, user, validator=validate)
+
+
+def _text(value, allow_empty=False):
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise ValueError("expected nonempty text")
+    return value.strip()
+
+
+def _strings(value, maximum, minimum=0):
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        raise ValueError("expected a bounded list of strings")
+    return list(dict.fromkeys(_text(v) for v in value))
 
 
 DRAFT_SYSTEM = """TASK: DRAFT. You extract claims that answer a research question from web sources.
@@ -100,10 +118,19 @@ def draft_claims(question: str, results: list[dict], evidence_bar: int) -> dict:
     sources = [{"n": i + 1, "url": r["url"], "title": r["title"],
                 "excerpt": excerpt(r["raw_content"] or r["content"], question)} for i, r in enumerate(results)]
     user = json.dumps({"question": question, "evidence_bar": evidence_bar, "sources": sources})
-    out = llm.chat_json(DRAFT_SYSTEM, user)
     urls = {r["url"] for r in results}
-    claims = [{"text": str(c.get("text", "")), "source_url": str(c.get("source_url", "")),
-               "quote": str(c.get("quote", "")), "confidence": float(c.get("confidence") or 0)}
-              for c in out.get("claims") or [] if c.get("source_url") in urls]
-    return {"claims": claims, "enough": bool(out.get("enough")), "reason": str(out.get("reason") or ""),
-            "next_queries": [str(q) for q in (out.get("next_queries") or [])][:2]}
+    def validate(out):
+        if type(out["enough"]) is not bool or not isinstance(out["claims"], list) or len(out["claims"]) > 8:
+            raise ValueError("invalid draft fields")
+        claims = []
+        for c in out["claims"]:
+            if not isinstance(c, dict) or c.get("source_url") not in urls:
+                raise ValueError("claim source must be a supplied URL")
+            confidence = c["confidence"]
+            if type(confidence) not in (float, int) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                raise ValueError("confidence must be a finite number between zero and one")
+            claims.append({"text": _text(c["text"]), "source_url": c["source_url"],
+                           "quote": _text(c["quote"]), "confidence": float(confidence)})
+        return {"claims": claims, "enough": out["enough"], "reason": _text(out["reason"]),
+                "next_queries": _strings(out["next_queries"], 2)}
+    return llm.chat_json(DRAFT_SYSTEM, user, validator=validate)
