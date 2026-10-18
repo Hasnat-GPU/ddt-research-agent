@@ -81,16 +81,17 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
     trace("PREDICT", f"expect pass rate {pred['pass_rate']}, {pred['searches']} searches, {pred['known']} known claims "
                      f"(from {pred['basis']} similar episodes{': ' + ', '.join(pred['neighbours']) if pred['neighbours'] else ''})")
 
-    # 3. Plan
+    # 3. Plan, with the evidence bar already raised if the prediction is weak (regulation rule 1)
+    low = pred["pass_rate"] < 0.6
     bar = selfmodel.get(topic)["evidence_bar"] if use_brain and topic else 1
+    if low and bar < 2:
+        bar = 2
+        trace("META", f"predicted pass rate {pred['pass_rate']} is below 0.6: evidence bar raised to 2 for this run")
     p = web.plan(question, known, bar, [g["text"] for g, _ in open_gaps], past_queries)
     if topic is None:
         topic = p["topic"] or "general"
-        bar = selfmodel.get(topic)["evidence_bar"] if use_brain else 1
+        bar = max(selfmodel.get(topic)["evidence_bar"] if use_brain else 1, 2 if low else 1)
         trace("PLAN", f'topic from the plan: "{topic}" | evidence bar {bar}')
-    if pred["pass_rate"] < 0.6 and bar < 2:
-        bar = 2
-        trace("META", f"predicted pass rate {pred['pass_rate']} is below 0.6: evidence bar raised to 2 for this run")
     covered = [c for c in known if c["id"] in p["covered"]]
     trace("PLAN", f"parts: {p['parts']}")
     trace("PLAN", f'topic "{topic}" | covered by known claims: {[c["id"] for c in covered] or "none"}')

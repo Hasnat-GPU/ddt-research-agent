@@ -16,7 +16,7 @@ PAGES = {
     "https://example.org/nemotron-family": (
         "NVIDIA Nemotron 3 is a family of open models for agentic AI.\n"
         "The Nemotron 3 family comes in three sizes called Nano, Super and Ultra for different workloads.\n"
-        "The models are released under the NVIDIA Open Model License, which allows commercial use."),
+        "The Nemotron 3 models are released under the NVIDIA Open Model License, which allows commercial use."),
     "https://example.org/nemotron-deploy": (
         "Developers can run Nemotron models on NVIDIA GPUs in the cloud, in data centers or on workstations.\n"
         "Nemotron 3 Nano is designed for efficient inference on a single GPU with a long context window."),
