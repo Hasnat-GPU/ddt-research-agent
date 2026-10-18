@@ -63,9 +63,12 @@ def plan(question: str, known_claims: list[dict], evidence_bar: int,
     out = llm.chat_json(PLAN_SYSTEM, user)
     known_ids = {c["id"] for c in known_claims}
     parts = [str(x) for x in (out.get("parts") or []) if str(x).strip()][:4] or [question]
+    covered = [i for i in out.get("covered") or [] if i in known_ids]
+    queries = [str(q) for q in (out.get("queries") or [])][:3]
+    if not queries and not covered:  # "queries": [] means the known claims answer the question
+        covered = [c["id"] for c in known_claims]
     return {"topic": str(out.get("topic") or "").strip().lower(), "parts": parts,
-            "covered": [i for i in out.get("covered") or [] if i in known_ids],
-            "queries": [str(q) for q in (out.get("queries") or [])][:3]}
+            "covered": covered, "queries": queries}
 
 
 DRAFT_SYSTEM = """TASK: DRAFT. You extract claims that answer a research question from web sources.
