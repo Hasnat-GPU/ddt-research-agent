@@ -110,19 +110,25 @@ def main() -> None:
     from tests import fakes
     fresh_brain("brain_s10fake")
     fakes.LATE_ONLINE = False
+    from ddt.stores import gaps
     r1 = agent.research(S10_Q1, topic=A["topic"])
+    opened = [g["id"] for g in gaps.all() if g["question"] == S10_Q1 and g["status"] == "open"]
+    before = gaps.all()
+    off = agent.research(S10_Q2, topic=A["topic"], use_brain=False)  # control: the gap is still open here
+    unchanged = gaps.all() == before
+    control_ok = bool(opened) and not off["open_from_before"] and unchanged
     fakes.LATE_ONLINE = True  # the stand-in web gains the page that answers the open gap
     r2 = agent.research(S10_Q2, topic=A["topic"])
-    off = agent.research(S10_Q2, topic=A["topic"], use_brain=False)
     fakes.LATE_ONLINE = False
-    from ddt.stores import gaps
-    opened = [g["id"] for g in gaps.all() if g["question"] == S10_Q1]
-    ok = bool(opened) and set(opened) & set(r2["open_from_before"]) and r2["closed"] >= 1
-    results["S10 stand-in"] = "PASS" if ok else "FAIL"
-    results["S10 control"] = "PASS" if not off["open_from_before"] else "CONTROL BROKEN"
+    same = set(opened) & set(r2["open_from_before"])
+    closed = [g["id"] for g in gaps.all()
+              if g["id"] in same and g["status"] == "closed" and g.get("closed_version", 0) > g["version"]]
+    results["S10 stand-in"] = "PASS" if closed else "FAIL"
+    results["S10 control"] = "PASS" if control_ok else "CONTROL BROKEN"
     say(f"S10 stand-in {results['S10 stand-in']} | run 1 opened {r1['opened']} gap(s) {opened}; run 2 retrieved "
-        f"{r2['open_from_before']} and closed {r2['closed']}")
-    say(f"S10 control {results['S10 control']} | brain off: gaps retrieved {off['open_from_before']} (must be none)")
+        f"{r2['open_from_before']} and closed {r2['closed']}; same gap closed at a later version: {closed or 'none'}")
+    say(f"S10 control {results['S10 control']} | brain off, right after run 1 with {len(opened)} gap(s) open: "
+        f"gaps retrieved {off['open_from_before']} (must be none); gap state unchanged: {'yes' if unchanged else 'no'}")
     if not a.fake:
         os.environ.pop("DDT_FAKE")
     research.SEARCHES["total"] = 0

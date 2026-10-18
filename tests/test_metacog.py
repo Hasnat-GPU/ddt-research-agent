@@ -20,8 +20,8 @@ def test_predict_with_neighbours():
     p = metacog.predict(Q, 3, "t")
     assert p["basis"] == 2
     assert p["pass_rate"] == 0.75  # equal similarity: mean of 0.5 and 1.0
-    assert p["searches"] == 0.5  # prior 0, plus the mean of the neighbours' errors against their prior: (0 + 1) / 2
-    assert metacog.compare(p, {"pass_rate": 1.0, "searches": 0}) == {"pass_rate": 0.25, "searches": 0.5}
+    assert p["searches"] == 2.0  # equal similarity: mean of 3 and 1; the current known count does not change it
+    assert metacog.compare(p, {"pass_rate": 1.0, "searches": 0}) == {"pass_rate": 0.25, "searches": 2.0}
 
 
 def test_learn_moves_w_toward_the_label():

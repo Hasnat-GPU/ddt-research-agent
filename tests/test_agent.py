@@ -16,7 +16,8 @@ def test_second_run_answers_from_the_brain():
     assert brain.counts()["version"] == 2  # one brain version per run
     trace = Path(second["trace_path"]).read_text(encoding="utf-8")
     assert "[PREDICT]" in trace and "[COMPARE]" in trace
-    assert second["prediction"]["searches"] == 0.0 and second["error"]["searches"] == 0.0
+    # HANDOFF-2 predictor: the neighbour (run 1) searched 3 times, so it predicts 3; run 2 searched 0
+    assert second["prediction"]["searches"] == 3.0 and second["error"]["searches"] == 3.0
     assert len(metacog.load()["log"]) == first["new"] + first["dropped"]
 
 

@@ -94,6 +94,10 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
         trace("PLAN", f'topic from the plan: "{topic}" | evidence bar {bar}')
     covered = [c for c in known if c["id"] in p["covered"]]
     trace("PLAN", f"parts: {p['parts']}")
+    if known and not covered and not p["queries"]:  # a plan that neither uses memory nor searches contradicts itself
+        covered, p["queries"] = repair_plan(p["parts"], known)
+        trace("META", f"plan had no covered claims and no queries: repaired by cosine {ANSWERED} or more: "
+                      f"covered {[c['id'] for c in covered] or 'none'}, queries {p['queries'] or 'none'}")
     if covered and p["queries"]:  # regulation rule 3: queries only for parts no known claim answers
         sims = llm.embed(p["parts"]) @ llm.embed([c["text"] for c in covered]).T
         if float(sims.max(axis=1).min()) >= ANSWERED:
@@ -200,6 +204,13 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
     return {"report_path": str(report), "trace_path": str(trace.path), "searches": web.SEARCHES["run"],
             "known": len(covered), "new": len(passed), "dropped": len(failed), "evidence_bar": bar,
             "topic": topic, "model": model, "citations": sorted({c["source_url"] for c in used}), **harness}
+
+
+def repair_plan(parts: list[str], known: list[dict]) -> tuple[list[dict], list[str]]:
+    """Covered: the known claims that answer a part. Queries: the parts no known claim answers (at most 3)."""
+    sims = llm.embed(parts) @ llm.embed([c["text"] for c in known]).T
+    covered = [c for j, c in enumerate(known) if float(sims[:, j].max()) >= ANSWERED]
+    return covered, [part for i, part in enumerate(parts) if float(sims[i].max()) < ANSWERED][:3]
 
 
 def _report(question, topic, model, bar, claims, covered, passed, failed, stamp, harness):

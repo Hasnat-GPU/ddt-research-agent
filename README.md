@@ -60,6 +60,49 @@ The evidence bar rule (per topic, applied in this order after every run):
 
 With evidence bar 2, every part of the question needs claims from 2 different sources before the agent stops searching.
 
+## The DDT vision, mapped to code
+
+The brain is the agent's internal harness: memory, context, state, tools and a metacognitive layer, each stored as vectors with readable text and updated after every run. Before acting, the harness predicts the run's outcome; after acting, it compares the prediction against what happened.
+
+| Vision part | In DDT | Store (in the brain folder) | Stored as |
+| --- | --- | --- | --- |
+| Memory | Checked claims (already built) | `brain.jsonl` + `brain.npy` | vector + text |
+| Context | One episode per run: question, planned parts, claims used, outcome, prediction and error | `episodes.jsonl` + `episodes.npy` | question vector + text |
+| State | Open gaps: parts of a question no checked claim answered, carried into later runs | `gaps.jsonl` + `gaps.npy` | vector + text |
+| Tools | Tool memory: every search query with its yield (passed claims from its results) | `tools.jsonl` + `tools.npy` | query vector + text |
+| Metacognitive layer | Self-knowledge: predictions from similar past episodes, plus an online model whose weights update after every checked claim | `metacog.json` (weights, log) + `selfmodel.json` (evidence bars, unchanged) | weight vector + numbers |
+| Inner environment | Before acting, the harness predicts the run; after, it compares | inside each episode | numbers |
+
+All stores sit inside the existing versioned brain folder, so one `brain.batch()` per run snapshots everything and `rollback 1` undoes a whole run across all stores.
+
+New trace tags in the loop:
+
+| Tag | Step | What happens |
+| --- | --- | --- |
+| [STATE] | Read, Write | Retrieves open gaps from earlier runs (cosine similarity 0.6 or more) for the planner; in Write, opens a gap for any planned part no checked claim answers (similarity 0.75 or more) and closes earlier open gaps now answered. |
+| [TOOLS] | Read | Retrieves up to 3 past search queries for similar questions (similarity 0.6 or more) with yield 1 or more, and offers them to the planner. |
+| [PREDICT] | Predict | Forecasts the run's pass rate and search count from the 5 nearest episodes (similarity 0.6 or more), or from the prior (pass rate 0.7; 3 searches if 0 known claims, else 0). |
+| [META] | Plan, Check | Raises the run's evidence bar to 2 before planning if the predicted pass rate is below 0.6. Before each quote check, logs `p_pass = sigmoid(w · x)` from the 6-weight online claim model (adding `low confidence` below 0.2); after the check, updates `w += lr * (y - p) * x`. |
+| [COMPARE] | Compare | Computes the absolute errors between predicted and actual pass rate and searches, and stores them in the episode. |
+
+Vision checks in `verify.py` (cap raised to 60 Tavily searches):
+
+| Check | How verify.py tests it | Control that must fail |
+| --- | --- | --- |
+| S8 Twin learns | From the S3 runs: mean absolute error of predicted vs actual searches in round 2 is lower than in round 1. | The failure-control runs (brain off) must NOT show a lower error in round 2. If they do, S8 is void. |
+| S9 Metacognition learns | Replay the logged claims in order twice: with lr 0.5 and with lr 0. PASS if the lr 0.5 replay's mean log loss on the second half of the claims is lower than the lr 0 replay's. Needs 10 or more logged claims, else NOT TRIGGERED. | The lr 0 replay is the control: its weights must stay at zero. |
+| S10 State carries over | Stand-in run (`DDT_FAKE=1`): a gap opened in run 1 is retrieved and closed in run 2. Live: PASS if any live run closed a gap opened earlier, else NOT TRIGGERED. | The stand-in run with the brain off must retrieve no gap. |
+
+Latest S8, S9 and S10 results:
+
+```
+{{S8}}
+{{S9}}
+{{S10}}
+```
+
+Limits of the vision harness: Nemotron's weights never change; what learns is the harness (vectors outside the model) and a 6-number metacognitive weight vector; this is continual learning in an external harness, not a solution to continual learning inside model weights.
+
 ## Verification
 
 `python verify.py` runs the checks below against Token Factory and Tavily, with at most 40 Tavily searches, prints PASS, FAIL or NOT TRIGGERED with the measured numbers, and appends them to the results file. A check counts only if it can fail, so there are two controls.

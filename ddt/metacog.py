@@ -18,15 +18,14 @@ def prior_searches(known: int) -> int:
 
 
 def predict(question_vec, known_count: int, topic: str, use_memory: bool = True) -> dict:
-    """Searches: the prior for this known count, corrected by the similarity-weighted mean of the
-    neighbours' own errors against their prior. Pass rate: the similarity-weighted mean of the neighbours'."""
+    """Pass rate and searches: the similarity-weighted means of the neighbours' actual values (HANDOFF-2 section 2).
+    With no neighbours: the prior."""
     near = episodes.search(question_vec, k=5, min_sim=0.6) if use_memory else []
     pred = {"pass_rate": PRIOR_PASS, "searches": float(prior_searches(known_count)), "known": known_count,
             "basis": len(near), "neighbours": [e["id"] for e, _ in near]}
     if near:
         total = sum(s for _, s in near)
-        residual = sum(s * (e["actual"]["searches"] - prior_searches(e["known"])) for e, s in near) / total
-        pred["searches"] = min(6.0, max(0.0, prior_searches(known_count) + residual))
+        pred["searches"] = sum(s * e["actual"]["searches"] for e, s in near) / total
         rated = [(e["actual"]["pass_rate"], s) for e, s in near if e["actual"]["pass_rate"] is not None]
         if rated:
             pred["pass_rate"] = sum(p * s for p, s in rated) / sum(s for _, s in rated)
