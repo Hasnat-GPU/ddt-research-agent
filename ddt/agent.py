@@ -94,6 +94,11 @@ def _run(question, topic, use_brain, model, stamp, trace) -> dict:
         trace("PLAN", f'topic from the plan: "{topic}" | evidence bar {bar}')
     covered = [c for c in known if c["id"] in p["covered"]]
     trace("PLAN", f"parts: {p['parts']}")
+    if covered and p["queries"]:  # regulation rule 3: queries only for parts no known claim answers
+        sims = llm.embed(p["parts"]) @ llm.embed([c["text"] for c in covered]).T
+        if float(sims.max(axis=1).min()) >= ANSWERED:
+            trace("META", f"every part is answered by a covered claim (cosine {ANSWERED} or more): queries dropped {p['queries']}")
+            p["queries"] = []
     trace("PLAN", f'topic "{topic}" | covered by known claims: {[c["id"] for c in covered] or "none"}')
     trace("PLAN", f"queries: {p['queries'] or 'none'}")
 

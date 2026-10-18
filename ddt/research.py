@@ -46,8 +46,8 @@ You get a question, the claims the agent already knows (each with an id) and the
 You may also get open gaps (parts of earlier questions that no checked claim answered yet) and past queries (earlier web searches that found checked claims for similar questions).
 Return only JSON: {"topic": "2 to 4 lowercase words", "parts": [2 to 4 sub-questions that together answer the question], "covered": [ids of known claims that answer part of the question], "queries": [web search queries for what is still missing]}.
 Rules:
-- Every part is one short sub-question of the given question.
-- Reuse or adapt a past query when it fits a missing part; an open gap that matches a missing part is worth a query.
+- Every part is one short sub-question that the given question itself asks. Add no parts about sources, provenance or details the question does not ask for.
+- Reuse or adapt a past query when it fits a missing part. Use an open gap only if it is one of this question's parts.
 - Prefer the known claims. Add a query only for a part of the question that no known claim answers.
 - If the known claims fully answer the question, "queries" is [].
 - If no claims are known, return exactly 3 queries.
