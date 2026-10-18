@@ -1,0 +1,26 @@
+{
+  "A": {
+    "topic": "nvidia nemotron",
+    "questions": [
+      "What model sizes does the NVIDIA Nemotron 3 family include?",
+      "Under which licence does NVIDIA release the Nemotron 3 models?",
+      "Where can developers run or deploy NVIDIA Nemotron models?"
+    ]
+  },
+  "B": {
+    "topic": "eu ai act",
+    "questions": [
+      "When did the EU AI Act enter into force?",
+      "From which date do the EU AI Act obligations for general-purpose AI models apply?",
+      "What are the maximum fines under the EU AI Act?"
+    ]
+  },
+  "S5": {
+    "topic": "european ai startup funding",
+    "question": "Which European AI startups raised the largest funding rounds in 2026, and how much did each raise?"
+  },
+  "S7": {
+    "model": "nvidia/Nemotron-3.5-Super-VL",
+    "question": "What model sizes does the NVIDIA Nemotron 3 family include?"
+  }
+}

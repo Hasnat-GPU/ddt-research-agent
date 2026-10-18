@@ -1,0 +1,5 @@
+numpy==2.5.4
+openai==3.35.1
+pytest==9.1.1
+python-dotenv==1.2.4
+tavily-python==0.8.5

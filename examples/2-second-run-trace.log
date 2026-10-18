@@ -1,0 +1,14 @@
+[READ] question: "What model sizes does the NVIDIA Nemotron 3 family include?" | model: nvidia/nemotron-3-super-120b-a12b | brain: on
+[READ] 5 known claims at similarity 0.75 or more (brain version 3)
+[READ]   5fa8d6ff sim 0.838: NVIDIA releases the Nemotron 3 models under the NVIDIA Nemotron Open Model License.
+[READ]   52e383c5 sim 0.827: The Nemotron 3 family includes Nano, Super and Ultra sizes.
+[READ]   5f6986ed sim 0.811: Nemotron 3 Nano is a compact 30B-parameter model with 3B active parameters per token.
+[READ]   4b196965 sim 0.776: Nemotron 3 Super is a 120 billion (active 12 billion) parameter hybrid Mamba-Attention Mixture-of-Experts model.
+[READ]   77c4d22c sim 0.759: Yes, you can download and run NVIDIA Nemotron models from Hugging Face for free in production.
+[READ] evidence bar for "nvidia nemotron": 1
+[PLAN] topic "nvidia nemotron" | covered by known claims: ['52e383c5', '5f6986ed', '4b196965']
+[PLAN] queries: none
+[DECIDE] the known claims answer the question: no search
+[WRITE] 0 claims added, 0 merged, 0 failed logged | brain version 4
+[REFLECT] evidence bar for "nvidia nemotron": 1 -> 1 (5 of 5 claims passed)
+[REPORT] reports\20261018-151039-what-model-sizes-does-the-nvidia-nemotron-3-family.md | 3 cited claims, 0 searches

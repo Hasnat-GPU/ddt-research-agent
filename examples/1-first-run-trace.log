@@ -1,0 +1,17 @@
+[READ] question: "What model sizes does the NVIDIA Nemotron 3 family include?" | model: nvidia/nemotron-3-super-120b-a12b | brain: on
+[READ] 0 known claims at similarity 0.75 or more (brain version 0)
+[READ] evidence bar for "nvidia nemotron": 1
+[PLAN] topic "nvidia nemotron" | covered by known claims: none
+[PLAN] queries: ['NVIDIA Nemotron 3 model sizes', 'Nemotron 3 parameter count variants', 'NVIDIA Nemotron 3 8B 70B']
+[SEARCH] #1 "NVIDIA Nemotron 3 model sizes": 5 results, 5 new pages
+[SEARCH] #2 "Nemotron 3 parameter count variants": 5 results, 5 new pages
+[SEARCH] #3 "NVIDIA Nemotron 3 8B 70B": 5 results, 4 new pages
+[DECIDE] 5 claims drafted | enough: True | reason: We have claims covering the Nano, Super, Ultra sizes and their parameter specifications from multiple distinct sources.
+[CHECK] PASS https://www.stocktitan.net/news/NVDA/nvidia-debuts-nemotron-3-family-of-open-wbn7g844bc22.html | "The Nemotron 3 family of open models — in Nano, Super and Ultra sizes — introduces the most efficient family of open models with leading accuracy for building agentic AI applications."
+[CHECK] FAIL https://nvidianews.nvidia.com/news/nvidia-debuts-nemotron-3-family-of-open-models | "The Nemotron 3 family of [MoE models] includes three sizes:"
+[CHECK] PASS https://deepinfra.com/blog/nemotron-3-nano-nvidia-efficient-small-llm | "A compact 30B-parameter model with 3B active parameters per token, ideal for efficient tasks like debugging, summarization, assistants, and information retrieval."
+[CHECK] PASS https://arxiv.org/html/2604.12374v1 | "a 120 billion (active 12 billion) parameter hybrid Mamba-Attention Mixture-of-Experts model."
+[CHECK] PASS https://www.mindstudio.ai/blog/nvidia-nemotron-3-ultra-agent-model | "NVIDIA Nemotron Ultra (formally Llama-4-Nemotron-Ultra-550B) is an open-weight large language model with 550 billion total parameters."
+[WRITE] 4 claims added, 0 merged, 1 failed logged | brain version 1
+[REFLECT] evidence bar for "nvidia nemotron": 1 -> 1 (4 of 5 claims passed)
+[REPORT] reports\20261018-150907-what-model-sizes-does-the-nvidia-nemotron-3-family.md | 4 cited claims, 3 searches
